@@ -33,8 +33,25 @@ NO_MAGISK_CHECK=1; # root is ReSukiSU in the kernel, skip Magisk detection and k
 [ -f Image.gz -o -f Image ] || abort "No kernel Image found in zip. Aborting...";
 
 # boot install
-split_boot; # kernel-only zip: skip ramdisk unpack, the existing ramdisk is repacked untouched
+dump_boot; # unpack the ramdisk: the first-stage fstab (fstab.mt6768 / fstab.mt6769t) lives there
 
-flash_boot; # must stay paired with split_boot, switch both to dump_boot/write_boot before adding ramdisk edits
+## first-stage fstab: no AVB/dm-verity for the logical (super) partitions, no file-based
+## encryption for /data. Pairs with a superkit-built super.img (the vendor copies of the fstab
+## get the same edit there) and a verification-disabled vbmeta. Dropping the encryption flags
+## requires a freshly formatted /data. The sed expressions only remove whole flag tokens; every
+## other byte of the fstab stays as Samsung shipped it, and re-flashing is a no-op.
+for fstab in fstab.mt6768 fstab.mt6769t; do
+  [ -f $RAMDISK/$fstab ] || continue;
+  backup_file $RAMDISK/$fstab;
+  # logical partitions (system, system_ext, vendor, product, odm): avb_keys=..., avb=vbmeta_system, avb
+  sed -i -e '/,logical,/{s/,avb_keys=[^,[:space:]]*//;s/,avb=[^,[:space:]]*//;s/,avb,/,/;}' $RAMDISK/$fstab;
+  # /data: fileencryption=..., keydirectory=..., metadata_encryption=... flags and the inlinecrypt mount option
+  sed -i -e '/[[:space:]]\/data[[:space:]]/{s/,fileencryption=[^,[:space:]]*//;s/,keydirectory=[^,[:space:]]*//;s/,metadata_encryption=[^,[:space:]]*//;s/,inlinecrypt\([,[:space:]]\)/\1/;}' $RAMDISK/$fstab;
+  # the prism/optics/vbmeta_system lines legitimately keep their avb flags, so only check what was edited
+  grep ',logical,' $RAMDISK/$fstab | grep -q 'avb' && abort "fstab patch failed on $fstab (avb left on a logical partition). Aborting...";
+  grep '[[:space:]]/data[[:space:]]' $RAMDISK/$fstab | grep -q 'fileencryption=\|keydirectory=\|inlinecrypt' && abort "fstab patch failed on $fstab (/data still encrypted). Aborting...";
+done;
+
+write_boot; # repacks the ramdisk (gzip, as found) and flashes boot
 ## end boot install
 
